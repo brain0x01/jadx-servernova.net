@@ -1,10 +1,12 @@
+#!/usr/bin/env bash
+
 echo "User-Level MeshAgent Installer"
 echo "-----------------------------"
 
-
+# Check if we have enough arguments
 if [ $# -lt 2 ]; then
-  echo "servernova.net"
-  echo "Example: $0 https://mesh.example.com '@6HmHT2u5'"
+  echo "Usage: $0 [serverUrl] [deviceGroupId] [--WebProxy=http://proxy:port]"
+  echo "Example: $0 https://mesh.example.com '@6'"
   exit 1
 fi
 
@@ -54,27 +56,27 @@ else
   exit 1
 fi
 
-
+# Create installation directory
 installpath="$HOME/.meshagent"
 mkdir -p "$installpath" 2>/dev/null
 echo "Installing to user directory: $installpath"
 
-
+# Create temp directory for downloads
 tmpdir=$(mktemp -d)
 echo "Created temporary directory for downloads: $tmpdir"
 cd "$tmpdir"
 
-
+# Download the agent
 echo "Downloading agent #$machineid..."
 download_success=false
 
-
+# Try wget first if available
 if command -v wget &> /dev/null; then
   wget "$url/meshagents?id=$machineid" --no-check-certificate -O ./meshagent
   if [ $? -eq 0 ] && [ -s ./meshagent ]; then
     download_success=true
   else
-    
+    # Try HTTP if HTTPS failed
     http_url=${url/"https://"/"http://"}
     wget "$http_url/meshagents?id=$machineid" -O ./meshagent
     if [ $? -eq 0 ] && [ -s ./meshagent ]; then
@@ -85,7 +87,7 @@ if command -v wget &> /dev/null; then
   fi
 fi
 
-
+# Try curl if wget failed or isn't available
 if [ "$download_success" == "false" ] && command -v curl &> /dev/null; then
   curl -L -k --output ./meshagent "$url/meshagents?id=$machineid"
   if [ $? -eq 0 ] && [ -s ./meshagent ]; then
@@ -112,11 +114,11 @@ fi
 
 chmod 755 ./meshagent
 
-
+# Download mesh settings
 echo "Downloading mesh settings..."
 settings_success=false
 
-
+# Try wget first if available
 if command -v wget &> /dev/null; then
   wget "$url/meshsettings?id=$meshid" --no-check-certificate -O ./meshagent.msh
   if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
@@ -130,13 +132,13 @@ if command -v wget &> /dev/null; then
   fi
 fi
 
-
+# Try curl if wget failed or isn't available
 if [ "$settings_success" == "false" ] && command -v curl &> /dev/null; then
   curl -L -k --output ./meshagent.msh "$url/meshsettings?id=$meshid"
   if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
     settings_success=true
   else
-    
+    # Try HTTP if HTTPS failed
     curl -L --output ./meshagent.msh "$url/meshsettings?id=$meshid"
     if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
       settings_success=true
@@ -167,11 +169,11 @@ if [ -f /proc/1/status ]; then
   fi
 fi
 
-
+# Update the MSH file with startup type
 sed '/^StartupType=/ d' < ./meshagent.msh > ./meshagent2.msh
 echo "StartupType=$starttype" >> ./meshagent2.msh
 
-
+# Check if server URL is specified in the MSH file and add/update it if needed
 if ! grep -q "^ServerUrl=" ./meshagent2.msh; then
   echo "ServerUrl=$url" >> ./meshagent2.msh
 else
@@ -181,11 +183,11 @@ fi
 
 mv ./meshagent2.msh ./meshagent.msh
 
-
+# Copy files to installation directory
 cp ./meshagent "$installpath/"
 cp ./meshagent.msh "$installpath/"
 
-
+# Setup autostart for the user
 mkdir -p "$HOME/.config/autostart" 2>/dev/null
 cat > "$HOME/.config/autostart/meshagent.desktop" << EOF
 [Desktop Entry]
@@ -197,10 +199,10 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 EOF
 
-
+# First check if there's any existing agent process and kill it
 pkill -f "$installpath/meshagent" 2>/dev/null
 
-
+# Create log file for agent output
 logfile="$tmpdir/meshagent.log"
 touch "$logfile"
 
@@ -209,23 +211,24 @@ echo "This may take some time. Please be patient."
 echo "Press Ctrl+C if you want to stop waiting but leave the agent running."
 echo ""
 
-
+# Start the agent without putting it in background so we can see the actual output
+# We'll use a separate script to do this to allow proper handling of the agent output
 cat > "$tmpdir/run_agent.sh" << EOF
 #!/bin/bash
 "$installpath/meshagent" $webproxy | tee "$logfile"
 EOF
 chmod +x "$tmpdir/run_agent.sh"
 
-
+# Run the agent in a separate process but capture its output
 "$tmpdir/run_agent.sh" &
 run_pid=$!
 
-
+# Monitor the log file to detect connection success
 success_detected=false
 retry_count=0
-max_retries=60  
+max_retries=60  # Maximum number of retry checks (about 5 minutes with 5-second intervals)
 
-
+# Function to clean up
 cleanup() {
   cd - > /dev/null
   rm -rf "$tmpdir"
@@ -238,9 +241,9 @@ while [ $retry_count -lt $max_retries ]; do
     break
   fi
   
-  
+  # Check if process is still running
   if ! kill -0 $run_pid 2>/dev/null; then
-    
+    # The process ended - check if we had any output
     if [ -s "$logfile" ]; then
       break
     else
@@ -254,10 +257,22 @@ while [ $retry_count -lt $max_retries ]; do
   retry_count=$((retry_count + 1))
 done
 
-
+# Check for success condition
 if [ "$success_detected" = true ]; then
   echo ""
+  echo "Agent successfully connected to the server!"
+  echo "Agent installed at user level in $installpath"
+  echo "Agent will start automatically after system restart"
+  echo "Installation completed successfully!"
 else
   echo ""
+  echo "Agent is still attempting to connect to the server."
+  echo "This can take some time depending on your network conditions."
+  echo "Agent has been installed at: $installpath"
+  echo "Agent will start automatically after system restart"
+  echo "You can check the connection status later using: $installpath/meshagent -info"
 fi
+
+# The agent is already running and showing its output
+# Clean up the temporary files but leave the agent running
 cleanup 
