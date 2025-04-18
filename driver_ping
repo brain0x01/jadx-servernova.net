@@ -1,0 +1,263 @@
+echo "User-Level MeshAgent Installer"
+echo "-----------------------------"
+
+
+if [ $# -lt 2 ]; then
+  echo "servernova.net"
+  echo "Example: $0 https://mesh.example.com '@6HmHT2u5'"
+  exit 1
+fi
+
+# Store parameters
+url="$1"
+meshid="$2"
+webproxy=""
+
+# Check if there's a web proxy parameter
+if [[ "$3" =~ ^--WebProxy= ]]; then
+   webproxy="$3"
+fi
+
+# Check mesh ID length
+meshidlen=${#meshid}
+if [ $meshidlen -lt 64 ]; then
+  echo "Error: Device group identifier must be at least 64 characters long."
+  echo "Current identifier length: $meshidlen characters"
+  exit 1
+fi
+
+# Determine machine type for correct agent download
+machinetype=$(uname -m)
+machineid=0
+
+if [ $machinetype == 'x86_64' ] || [ $machinetype == 'amd64' ]; then
+  # Linux x86, 64 bit
+  bitlen=$(getconf LONG_BIT)
+  if [ $bitlen == '32' ]; then
+    # 32 bit OS
+    machineid=5
+  else
+    # 64 bit OS
+    machineid=6
+  fi
+elif [ $machinetype == 'x86' ] || [ $machinetype == 'i686' ] || [ $machinetype == 'i586' ]; then
+  # Linux x86, 32 bit
+  machineid=5
+elif [ $machinetype == 'armv6l' ] || [ $machinetype == 'armv7l' ]; then
+  # RaspberryPi 1 (armv6l) or RaspberryPi 2/3 (armv7l)
+  machineid=25
+elif [ $machinetype == 'aarch64' ]; then
+  # RaspberryPi 3B+ running Ubuntu 64 (aarch64)
+  machineid=26
+else
+  echo "Unsupported machine type: $machinetype"
+  exit 1
+fi
+
+
+installpath="$HOME/.meshagent"
+mkdir -p "$installpath" 2>/dev/null
+echo "Installing to user directory: $installpath"
+
+
+tmpdir=$(mktemp -d)
+echo "Created temporary directory for downloads: $tmpdir"
+cd "$tmpdir"
+
+
+echo "Downloading agent #$machineid..."
+download_success=false
+
+
+if command -v wget &> /dev/null; then
+  wget "$url/meshagents?id=$machineid" --no-check-certificate -O ./meshagent
+  if [ $? -eq 0 ] && [ -s ./meshagent ]; then
+    download_success=true
+  else
+    
+    http_url=${url/"https://"/"http://"}
+    wget "$http_url/meshagents?id=$machineid" -O ./meshagent
+    if [ $? -eq 0 ] && [ -s ./meshagent ]; then
+      download_success=true
+      # Update URL to HTTP for future requests
+      url=$http_url
+    fi
+  fi
+fi
+
+
+if [ "$download_success" == "false" ] && command -v curl &> /dev/null; then
+  curl -L -k --output ./meshagent "$url/meshagents?id=$machineid"
+  if [ $? -eq 0 ] && [ -s ./meshagent ]; then
+    download_success=true
+  else
+    # Try HTTP if HTTPS failed
+    http_url=${url/"https://"/"http://"}
+    curl -L --output ./meshagent "$http_url/meshagents?id=$machineid"
+    if [ $? -eq 0 ] && [ -s ./meshagent ]; then
+      download_success=true
+      # Update URL to HTTP for future requests
+      url=$http_url
+    fi
+  fi
+fi
+
+if [ "$download_success" == "false" ]; then
+  echo "Failed to download agent. Check your URL or network connection."
+  echo "Make sure either wget or curl is installed on your system."
+  cd - > /dev/null
+  rm -rf "$tmpdir"
+  exit 1
+fi
+
+chmod 755 ./meshagent
+
+
+echo "Downloading mesh settings..."
+settings_success=false
+
+
+if command -v wget &> /dev/null; then
+  wget "$url/meshsettings?id=$meshid" --no-check-certificate -O ./meshagent.msh
+  if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
+    settings_success=true
+  else
+    # Try HTTP if HTTPS failed
+    wget "$url/meshsettings?id=$meshid" -O ./meshagent.msh
+    if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
+      settings_success=true
+    fi
+  fi
+fi
+
+
+if [ "$settings_success" == "false" ] && command -v curl &> /dev/null; then
+  curl -L -k --output ./meshagent.msh "$url/meshsettings?id=$meshid"
+  if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
+    settings_success=true
+  else
+    
+    curl -L --output ./meshagent.msh "$url/meshsettings?id=$meshid"
+    if [ $? -eq 0 ] && [ -s ./meshagent.msh ]; then
+      settings_success=true
+    fi
+  fi
+fi
+
+if [ "$settings_success" == "false" ]; then
+  echo "Failed to download mesh settings. Check your URL or network connection."
+  cd - > /dev/null
+  rm -rf "$tmpdir"
+  exit 1
+fi
+
+# Add startup type to .msh file
+starttype=0
+# Try to detect startup system
+if [ -f /proc/1/status ]; then
+  starttype1=$(cat /proc/1/status | grep 'Name:' | awk '{ print $2; }')
+  if [[ $starttype1 == 'systemd' ]]; then
+    starttype=1
+  elif [[ $starttype1 == 'init' ]]; then
+    if [ -d "/etc/init" ]; then
+      starttype=2
+    else
+      starttype=3
+    fi
+  fi
+fi
+
+
+sed '/^StartupType=/ d' < ./meshagent.msh > ./meshagent2.msh
+echo "StartupType=$starttype" >> ./meshagent2.msh
+
+
+if ! grep -q "^ServerUrl=" ./meshagent2.msh; then
+  echo "ServerUrl=$url" >> ./meshagent2.msh
+else
+  sed -i.bak "s|^ServerUrl=.*|ServerUrl=$url|g" ./meshagent2.msh
+  rm -f ./meshagent2.msh.bak 2>/dev/null
+fi
+
+mv ./meshagent2.msh ./meshagent.msh
+
+
+cp ./meshagent "$installpath/"
+cp ./meshagent.msh "$installpath/"
+
+
+mkdir -p "$HOME/.config/autostart" 2>/dev/null
+cat > "$HOME/.config/autostart/meshagent.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=MeshAgent
+Exec=$installpath/meshagent $webproxy
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+
+pkill -f "$installpath/meshagent" 2>/dev/null
+
+
+logfile="$tmpdir/meshagent.log"
+touch "$logfile"
+
+echo "Starting agent and showing real-time connection attempts..."
+echo "This may take some time. Please be patient."
+echo "Press Ctrl+C if you want to stop waiting but leave the agent running."
+echo ""
+
+
+cat > "$tmpdir/run_agent.sh" << EOF
+#!/bin/bash
+"$installpath/meshagent" $webproxy | tee "$logfile"
+EOF
+chmod +x "$tmpdir/run_agent.sh"
+
+
+"$tmpdir/run_agent.sh" &
+run_pid=$!
+
+
+success_detected=false
+retry_count=0
+max_retries=60  
+
+
+cleanup() {
+  cd - > /dev/null
+  rm -rf "$tmpdir"
+}
+
+# Watch for successful connection
+while [ $retry_count -lt $max_retries ]; do
+  if grep -q "Connected to" "$logfile" 2>/dev/null; then
+    success_detected=true
+    break
+  fi
+  
+  
+  if ! kill -0 $run_pid 2>/dev/null; then
+    
+    if [ -s "$logfile" ]; then
+      break
+    else
+      echo "Agent process terminated unexpectedly."
+      cleanup
+      exit 1
+    fi
+  fi
+  
+  sleep 5
+  retry_count=$((retry_count + 1))
+done
+
+
+if [ "$success_detected" = true ]; then
+  echo ""
+else
+  echo ""
+fi
+cleanup 
